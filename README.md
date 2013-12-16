@@ -20,7 +20,7 @@ Design
 
 * V-USB implements USB entirely in software, and supports this hardware.
 
-* The USBASP design exposes three pins that we can use: TXD and RXD on the ISP connector, and a pin on JP3 (clock select jumper). TX isn't useful for ADB because it has a 1K resistor in series, but RXD or the pin on JP3 works. So no need to physically modify the USBASP at all.
+* The USBASP design exposes three pins that we can use, in addition to the four ISP pins (RESET, SCK, MOSI, MISO): TXD and RXD on the ISP connector, and a pin on JP3 (clock select jumper). TX isn't useful for ADB because it has a 1K resistor in series, but RXD or the pin on JP3 works. So no need to physically modify the USBASP at all.
 
 * The ADB code is timing-sensitive, and the V-USB code's interrupt handler can take up to 100us. So we wait for a V-USB interrupt (by putting the CPU to sleep), then disable interrupts while we run the timing-sensitive ADB code, which takes about 3.3ms. The synchronization ensures that we don't randomly interfere with V-USB. Testing shows that this doesn't disrupt USB activity or cause USB errors (dmesg on Linux shows nothing). This also serves to limit the ADB polling rate to 125Hz (8ms period).
 
@@ -62,6 +62,7 @@ Alternate hardware
 Pinouts
 -------
 USBASP ISP connector (male):
+
            ______
 	 MOSI | 1  2 | +5V
 	  GND | 3  4 | TXD
