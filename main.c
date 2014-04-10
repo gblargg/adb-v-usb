@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <avr/io.h>
+#include <avr/power.h>
 #include <avr/sleep.h>
 #include <avr/pgmspace.h>
 #include <avr/interrupt.h>
@@ -18,6 +19,12 @@ typedef unsigned char byte;
 
 enum { tcnt1_hz = (F_CPU + 512) / 1024 };
 enum { wake_period = tcnt1_hz }; // once a second
+
+#ifndef TIMSK
+	#define TIMSK TIMSK1
+	#define TICIE1 ICIE1
+	#define TIFR TIFR1
+#endif
 
 static void timer1_init( void )
 {
@@ -49,7 +56,8 @@ ISR(TIMER1_OVF_vect)
 			USBDDR |= USBMASK;
 			_delay_ms( 10 );
 			USBDDR &= ~USBMASK;
-			GIFR = 1<<INTF0; // clear since we probably just triggered it
+			// clear since we probably just triggered it
+			USB_INTR_PENDING = 1<<USB_INTR_PENDING_BIT; 
 		}
 	}
 }
@@ -181,6 +189,10 @@ static void pullup_ports( void )
 
 int main( void )
 {
+	#ifdef clock_prescale_set
+		clock_prescale_set( clock_div_1 );
+	#endif
+	
 	// Reduce power usage
 	pullup_ports();
 	

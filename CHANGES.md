@@ -1,3 +1,6 @@
+* Added detection of extended versus compact keyboard, and use of separate keymap.
+
+
 blargg-adb-v-usb-4
 ------------------
 * Fixed keypad equals to KP_EQUAL instead of normal equals.

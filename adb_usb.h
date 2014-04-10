@@ -151,9 +151,13 @@ static void adb_usb_init( void )
 	adb_host_init();
 	_delay_ms( 300 ); // keyboard needs at least 250ms or it'll ignore host_listen below
 	
+	uint16_t id = adb_host_talk( adb_cmd_read + 3 );
+	if ( id != adb_host_nothing && id != adb_host_error )
+		init_keymap( id & 0xff );
+	
 	// Enable separate key codes for left/right shift/control/option keys
 	// on Apple Extended Keyboard.
-	adb_host_listen( 0x2B, 0x02, 0x03 );
+	adb_host_listen( adb_cmd_write + 3, 0x02, 0x03 );
 	
 	usb_init();
 	while ( !usb_configured() )
