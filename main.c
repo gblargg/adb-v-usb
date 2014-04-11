@@ -31,7 +31,7 @@ static void timer1_init( void )
 	TIMSK |= 1<<TOIE1;
 }
 
-static volatile bool usb_inactive = false;
+static volatile bool usb_inactive;
 
 ISR(TIMER1_OVF_vect)
 {
@@ -40,7 +40,7 @@ ISR(TIMER1_OVF_vect)
 
 static unsigned idle_timer; // incremented at same rate as TCNT1
 
-static bool update_idle( void )
+static void update_idle( void )
 {
 	enum { t1_from_idle = (tcnt1_hz * 4L + 500) / 1000 };
 	static unsigned prev_time;
@@ -55,10 +55,9 @@ static bool update_idle( void )
 		if ( elapsed >= period )
 		{
 			prev_time = idle_timer;
-			return true;
+			usb_changed = true;
 		}
 	}
-	return false;
 }
 
 static bool usb_was_reset;
@@ -68,9 +67,24 @@ void hadUsbReset( void )
 	usb_was_reset = true;
 }
 
+static void handle_reset( void )
+{
+	// Give host time to negotiate with us before we go to only handling one
+	// USB command every 8ms
+	if ( usb_was_reset )
+	{
+		usb_was_reset = false;
+		
+		DEBUG( debug_log( 0x1c, 0, 0 ) );
+		usb_keyboard_reset();
+		while ( TCNT1 < tcnt1_hz / 2 )
+			usbPoll();
+	}
+}
+
 enum { inactive_timeout = tcnt1_hz / 4 }; // no USB activity signals host asleep or resetting
 
-// Waits for USB activity and handles excessive inactivity. Returns true if none.
+// Waits for USB activity. Returns true if timed out.
 static bool wait_usb( void )
 {
 	// accumulate time since last change to TCNT1
@@ -81,10 +95,12 @@ static bool wait_usb( void )
 	usb_inactive = false;
 	sleep_enable();
 	sleep_cpu();
-	if ( !usb_inactive )
-		return false; // USB activity before timeout
-	
-	// Timed out
+	return usb_inactive;
+}
+
+// Waits until USB becomes active, host issues USB reset, or keyboard power key is pressed
+static void while_usb_inactive( void )
+{
 	DEBUG( debug_log( 0x1a, 0, 0 ) );
 	
 	// Wait for USB activity without any interruption
@@ -116,21 +132,18 @@ static bool wait_usb( void )
 	sei();
 	
 	DEBUG( debug_log( 0x1b, 0, 0 ) );
-	
-	// Give host time to negotiate with us before we go to only handling one
-	// USB command every 8ms
-	if ( usb_was_reset )
-	{
-		DEBUG( debug_log( 0x1c, 0, 0 ) );
-		usb_keyboard_reset();
-		while ( TCNT1 < tcnt1_hz / 2 )
-			usbPoll();
-	}
-	
-	return true;
 }
 
-static bool handle_adb( void )
+static void usb_keyboard_send_if_changed( void )
+{
+	if ( usb_changed )
+	{
+		usb_changed = false;
+		usb_keyboard_send();
+	}
+}
+
+static void handle_adb( void )
 {
 	static byte adb_extra_ = 0xFF;
 	
@@ -138,7 +151,7 @@ static bool handle_adb( void )
 	uint16_t keys = adb_host_kbd_recv();
 	sei();
 	
-	bool changed = release_caps();
+	release_caps();
 	
 	// The three potential events (0xFF=none), listed in order of occurrence
 	byte key2 = adb_extra_;  // possibly == 0xFF
@@ -148,14 +161,11 @@ static bool handle_adb( void )
 	// Parse extra now
 	adb_extra_ = 0xFF;
 	if ( key2 != 0xFF )
-	{
 		parse_adb( key2 );
-		changed = true;
-	}
 	
 	// See if no new events
 	if ( keys == adb_host_nothing || keys == adb_host_error )
-		return changed;
+		return;
 	
 	// For some keys (e.g. power) the same event is in both bytes
 	if ( key0 == key1 )
@@ -190,12 +200,12 @@ static bool handle_adb( void )
 			// If both new events are same as extra key, we must send extra,
 			// first event, then save second event as new extra
 			if ( ((key2 ^ key1) & 0x7F) == 0 )
-				usb_keyboard_send();
+				usb_keyboard_send_if_changed();
 			
 			// Second event matches extra, so save as new extra
 			adb_extra_ = key0;
 			parse_adb( key1 );
-			return true;
+			return;
 		}
 		
 		if ( ((key2 ^ key1) & 0x7F) == 0 )
@@ -207,7 +217,7 @@ static bool handle_adb( void )
 			adb_extra_ = key1;
 			if ( key0 != 0xFF )
 				parse_adb( key0 );
-			return true;
+			return;
 		}
 		
 		// No matches, so extra gets merged with new events
@@ -224,52 +234,48 @@ static bool handle_adb( void )
 		adb_extra_ = key0;
 	else if ( key0 != 0xFF )
 		parse_adb( key0 );
-	
-	return true;
 }
 
-// Avoid floating inputs on unused pins
-static void pullup_ports( void )
-{
-	DDRB  = 0;
-	PORTB = 0xFF;
-	DDRC  = 0;
-	PORTC = 0xFF;
-	DDRD  = 0;
-	PORTD = 0xFF;
-}
-
-int main( void )
+static void init( void )
 {
 	#ifdef clock_prescale_set
 		clock_prescale_set( clock_div_1 );
 	#endif
 	
 	// Reduce power usage
-	pullup_ports();
+	// Avoid floating inputs on unused pins
+	DDRB  = 0;
+	PORTB = 0xFF;
+	DDRC  = 0;
+	PORTC = 0xFF;
+	DDRD  = 0;
+	PORTD = 0xFF;
 	
 	adb_usb_init();
 	timer1_init();
+}
+
+int main( void )
+{
+	init();
 	
 	byte frame = 0;
-	bool changed = false;
 	for ( ;; )
 	{
-		// Flush changes and synchronize
-		if ( usb_keyboard_poll() && changed )
-		{
-			// USB is idle so do this before interrupt
-			usb_keyboard_send();
-			changed = false;
-		}
+		handle_reset();
+		
+		// Update while USB is idle before next interrupt
+		if ( usb_keyboard_poll() )
+			usb_keyboard_send_if_changed();
 		
 		if ( wait_usb() )
+		{
+			while_usb_inactive();
 			continue;
+		}
 		
 		byte synced_time = TCNT1L;
-		if ( changed )
-			usb_keyboard_send();
-		changed = false;
+		usb_keyboard_send_if_changed();
 		
 		// Poll ADB every two out of three frames
 		if ( frame <= 1 )
@@ -280,10 +286,9 @@ int main( void )
 				while ( (byte) (TCNT1L - synced_time) < half_interrupt )
 					{ }
 			
-			// Poll ADB and send any changes
-			// DO NOT use || as this will not call both funcs!
-			changed = handle_adb() | update_idle();
-			
+			handle_adb();
+			keymap_idle();
+			update_idle(); // boot protocol timed update
 			frame++;
 		}
 		else

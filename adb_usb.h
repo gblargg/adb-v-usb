@@ -7,8 +7,7 @@ static void adb_usb_init( void );
 static void parse_adb( unsigned char raw );
 
 // Call before each ADB transaction to process previous press of caps lock.
-// True if caps lock was released and usb_keyboard_send() needs to be called.
-static bool release_caps( void );
+static void release_caps( void );
 
 // Call periodically to update LED state
 static void handle_leds( void );
@@ -21,18 +20,27 @@ enum { max_keys = 6 };
 enum { released_mask = 0x80 };
 enum { adb_caps = 0x39 };
 
+bool usb_changed;
+
 static void parse_adb_( byte raw )
 {
-	byte code = usb_from_adb_code( raw & 0x7F );
+	keymap_handle_event( raw );
+}
+
+// called by keymap_handle_event()
+void keymap_usb_hook( uint8_t code, uint8_t released )
+{
 	if ( !code )
 		return;
+	
+	usb_changed = true;
 	
 	if ( KC_LCTRL <= code && code <= KC_RGUI )
 	{
 		// Modifier; route to mask rather than keys list
 		byte mask = 1 << (code - KC_LCTRL);
 		keyboard_modifier_keys |= mask;
-		if ( raw & released_mask )
+		if ( released )
 			keyboard_modifier_keys ^= mask;
 	}
 	else
@@ -46,7 +54,7 @@ static void parse_adb_( byte raw )
 		}
 		while ( p != keyboard_keys );
 
-		if ( raw & released_mask )
+		if ( released )
 		{
 			// Remove key
 			if ( *p == code )
@@ -55,7 +63,7 @@ static void parse_adb_( byte raw )
 				return;
 			}
 			
-			DEBUG(debug_byte( raw ));
+			DEBUG(debug_byte( code ));
 			DEBUG(debug_str( "released key not in list\n" ));
 		}
 		else
@@ -92,7 +100,7 @@ static void parse_adb( byte raw )
 	parse_adb_( raw );
 }
 
-static bool release_caps( void ) { return false; }
+static void release_caps( void ) { }
 
 static void leds_changed( byte leds ) { (void) leds; }
 
@@ -103,15 +111,13 @@ enum { caps_mask = 2 };
 static byte caps_pressed;
 static byte caps_on;
 
-static bool release_caps( void )
+static void release_caps( void )
 {
 	if ( caps_pressed )
 	{
 		caps_pressed = false;
 		parse_adb_( adb_caps | released_mask );
-		return true;
 	}
-	return false;
 }
 
 static void leds_changed( byte leds )
@@ -152,8 +158,9 @@ static void adb_usb_init( void )
 	_delay_ms( 300 ); // keyboard needs at least 250ms or it'll ignore host_listen below
 	
 	uint16_t id = adb_host_talk( adb_cmd_read + 3 );
-	if ( id != adb_host_nothing && id != adb_host_error )
-		init_keymap( id & 0xff );
+	if ( id == adb_host_nothing || id == adb_host_error )
+		id = 0;
+	keymap_init( id & 0xff );
 	
 	// Enable separate key codes for left/right shift/control/option keys
 	// on Apple Extended Keyboard.

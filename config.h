@@ -24,4 +24,7 @@
 // with USB interrupts. Shouldn't cause any problems.
 #define ADB_REDUCED_TIME 1
 
+// Swaps command and option keys, as Apple USB keyboards do, to work with older Macs
+//#define ADB_SWAP_CMD_OPTION 1
+
 #endif
