@@ -4,4 +4,4 @@ all:
 	avr-objcopy -R .eeprom -R .fuse -R .lock -R .signature -O ihex main.elf main.hex
 
 flash: all
-	avrdude -v -p m8 -c usbasp -e -U flash:w:main.hex
+	avrdude -v -p m8 -c usbasp -e -U main.hex

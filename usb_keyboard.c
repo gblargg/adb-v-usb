@@ -6,9 +6,18 @@
 
 #include "usbdrv/usbdrv.h"
 
+#ifdef HAVE_CONFIG_H
+	#include "config.h"
+#endif
+
+#ifndef DEBUG
+	#define DEBUG( e )
+#endif
+
 uint8_t keyboard_report_ [8];
 uint8_t keyboard_idle_period;
 uint8_t keyboard_leds;
+static uint8_t protocol = 1; //	0=boot 1=report
 
 const PROGMEM char usbHidReportDescriptor [USB_CFG_HID_REPORT_DESCRIPTOR_LENGTH] = {
 	0x05, 0x01, // USAGE_PAGE (Generic Desktop)
@@ -59,11 +68,10 @@ uint8_t usbFunctionSetup( uint8_t data [8] )
 	if ( (rq->bmRequestType & USBRQ_TYPE_MASK) != USBRQ_TYPE_CLASS )
 		return 0;
 	
-	static uint8_t protocol = 1; //	0=boot 1=report
-	
 	switch ( rq->bRequest )
 	{
 	case USBRQ_HID_GET_REPORT: // perhaps also only used for boot protocol
+		//DEBUG( debug_log( 0x01, 0, 0 ) );
 		usbMsgPtr = keyboard_report_;
 		return sizeof keyboard_report_;
 	
@@ -74,19 +82,23 @@ uint8_t usbFunctionSetup( uint8_t data [8] )
 	
 	// The following are only used for boot protocol:
 	case USBRQ_HID_GET_IDLE:
+		//DEBUG( debug_log( 0x02, 0, 0 ) );
 		usbMsgPtr = &keyboard_idle_period;
 		return 1;
 	
 	case USBRQ_HID_SET_IDLE:
 		keyboard_idle_period = rq->wValue.bytes [1];
+		//DEBUG( debug_log( 0x03, &keyboard_idle_period, sizeof keyboard_idle_period ) );
 		return 0;
 	
 	case USBRQ_HID_GET_PROTOCOL:
+		//DEBUG( debug_log( 0x04, 0, 0 ) );
 		usbMsgPtr = &protocol;
 		return 1;
 	
 	case USBRQ_HID_SET_PROTOCOL:
 		protocol = rq->wValue.bytes [1];
+		//DEBUG( debug_log( 0x05, &protocol, sizeof protocol ) );
 		return 0;
 	
 	default:
@@ -115,6 +127,12 @@ uint8_t usb_configured( void )
 {
 	usb_keyboard_poll();
 	return usbConfiguration;
+}
+
+void usb_keyboard_reset( void )
+{
+	protocol = 1;
+	keyboard_idle_period = 0;
 }
 
 uint8_t usb_keyboard_poll( void )

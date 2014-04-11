@@ -15,6 +15,9 @@ uint8_t usb_configured( void );
 // Call often (every few msec). If true, USB is ready to accept a keyboard update.
 uint8_t usb_keyboard_poll( void );
 
+// Call when USB reset is received or keyboard might not work in BIOS setup after reboot
+void usb_keyboard_reset( void );
+
 // Push changes to keyboard_keys and keyboard_modifier_keys to host. If usb_keyboard_idle()
 // returned false, this blocks until USB is ready to accept keyboard data being sent.
 int8_t usb_keyboard_send( void );

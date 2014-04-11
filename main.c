@@ -18,7 +18,6 @@ typedef unsigned char byte;
 #include "adb_usb.h"
 
 enum { tcnt1_hz = (F_CPU + 512) / 1024 };
-enum { wake_period = tcnt1_hz }; // once a second
 
 #ifndef TIMSK
 	#define TIMSK TIMSK1
@@ -32,50 +31,103 @@ static void timer1_init( void )
 	TIMSK |= 1<<TOIE1;
 }
 
-static volatile bool wake_ignore = true; // we set this regularly in main loop
+static volatile bool usb_inactive = false;
 
-// Runs once every several seconds
 ISR(TIMER1_OVF_vect)
 {
-	if ( wake_ignore )
-	{
-		wake_ignore = false;
-	}
-	else
-	{
-		// Host is in suspend, so have this ISR called more often
-		TCNT1 = -wake_period;
-	
-		uint16_t keys = adb_host_kbd_recv();
-	
-		// See if power key pressed
-		if ( (keys >> 8 & 0xFF) == 0x7F )
-		{
-			// USB SE0 to wake host
-			USBOUT &= ~USBMASK;
-			USBDDR |= USBMASK;
-			_delay_ms( 10 );
-			USBDDR &= ~USBMASK;
-			// clear since we probably just triggered it
-			USB_INTR_PENDING = 1<<USB_INTR_PENDING_BIT; 
-		}
-	}
+	usb_inactive = true;
 }
+
+static unsigned idle_timer; // incremented at same rate as TCNT1
 
 static bool update_idle( void )
 {
-	// TODO: get host to actually use this mode so it can be tested
-	if ( keyboard_idle_period ) // update periodically if USB host wants it
+	enum { t1_from_idle = (tcnt1_hz * 4L + 500) / 1000 };
+	static unsigned prev_time;
+	if ( !keyboard_idle_period )
 	{
-		enum { t1_from_idle = (tcnt1_hz * 4L + 500) / 1000 };
-		static unsigned next;
-		if ( (int) (TCNT1 - next) >= 0 )
+		prev_time = idle_timer;
+	}
+	else
+	{
+		unsigned elapsed = idle_timer - prev_time;
+		unsigned period = keyboard_idle_period * t1_from_idle;
+		if ( elapsed >= period )
 		{
-			next = TCNT1 + keyboard_idle_period * t1_from_idle;
+			prev_time = idle_timer;
 			return true;
 		}
 	}
 	return false;
+}
+
+static bool usb_was_reset;
+
+void hadUsbReset( void )
+{
+	usb_was_reset = true;
+}
+
+enum { inactive_timeout = tcnt1_hz / 4 }; // no USB activity signals host asleep or resetting
+
+// Waits for USB activity and handles excessive inactivity. Returns true if none.
+static bool wait_usb( void )
+{
+	// accumulate time since last change to TCNT1
+	idle_timer += TCNT1 - -inactive_timeout;
+	
+	// Wake after timeout if no USB activity
+	TCNT1 = -inactive_timeout;
+	usb_inactive = false;
+	sleep_enable();
+	sleep_cpu();
+	if ( !usb_inactive )
+		return false; // USB activity before timeout
+	
+	// Timed out
+	DEBUG( debug_log( 0x1a, 0, 0 ) );
+	
+	// Wait for USB activity without any interruption
+	cli();
+	usb_was_reset = false;
+	USB_INTR_PENDING = 1<<USB_INTR_PENDING_BIT; 
+	while ( !(USB_INTR_PENDING & (1<<USB_INTR_PENDING_BIT)) ) // stop on USB activity
+	{
+		// Check for USB reset. Sets usb_was_reset if so.
+		usbPoll();
+		
+		// Check power key periodically
+		if ( TCNT1 >= usb_inactive )
+		{
+			TCNT1 = 0;
+			uint16_t keys = adb_host_kbd_recv();
+			if ( (keys >> 8 & 0xFF) == 0x7F )
+			{
+				// USB SE0 to wake host
+				USBOUT &= ~USBMASK;
+				USBDDR |= USBMASK;
+				_delay_ms( 10 );
+				USBDDR &= ~USBMASK;
+				usb_was_reset = true;
+				break;
+			}
+		}
+	}
+	sei();
+	
+	DEBUG( debug_log( 0x1b, 0, 0 ) );
+	
+	// Give host time to negotiate with us before we go to only handling one
+	// USB command every 8ms
+	if ( usb_was_reset )
+	{
+		DEBUG( debug_log( 0x1c, 0, 0 ) );
+		usb_keyboard_reset();
+		while ( TCNT1 < tcnt1_hz / 2 )
+			usbPoll();
+	}
+	
+	return true;
 }
 
 static bool handle_adb( void )
@@ -210,8 +262,10 @@ int main( void )
 			usb_keyboard_send();
 			changed = false;
 		}
-		sleep_enable();
-		sleep_cpu();
+		
+		if ( wait_usb() )
+			continue;
+		
 		byte synced_time = TCNT1L;
 		if ( changed )
 			usb_keyboard_send();
@@ -237,7 +291,6 @@ int main( void )
 			// Every third frame, update LEDs instead of polling ADB
 			// This also gives USB a chance to send LED updates
 			handle_leds();
-			wake_ignore = true;
 			
 			frame = 0;
 		}
