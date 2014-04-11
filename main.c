@@ -97,7 +97,7 @@ static bool wait_usb( void )
 		usbPoll();
 		
 		// Check power key periodically
-		if ( TCNT1 >= usb_inactive )
+		if ( TCNT1 >= inactive_timeout )
 		{
 			TCNT1 = 0;
 			uint16_t keys = adb_host_kbd_recv();

@@ -1,6 +1,6 @@
 * Fixed to not give any low-level USB errors when PC is resuming from sleep
 * Improved power key to respond immediately and wake PC
-* Fixed boot protocol mode (used when booting PC into BIOS setup program)
+* Fixed boot protocol mode to work properly after reboot (used when booting PC into BIOS setup program)
 * Added detection of extended versus compact keyboard, and use of separate keymap.
 
 
