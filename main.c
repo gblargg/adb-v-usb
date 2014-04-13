@@ -5,13 +5,11 @@
 #include <avr/io.h>
 #include <avr/power.h>
 #include <avr/sleep.h>
-#include <avr/pgmspace.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
 
 #include "usbdrv/usbdrv.h"
 
-typedef unsigned char byte;
 #define DEBUG( e )
 #include "config.h"
 
@@ -55,7 +53,7 @@ static void update_idle( void )
 		if ( elapsed >= period )
 		{
 			prev_time = idle_timer;
-			usb_changed = true;
+			usb_keyboard_touch();
 		}
 	}
 }
@@ -109,8 +107,10 @@ static void while_usb_inactive( void )
 	USB_INTR_PENDING = 1<<USB_INTR_PENDING_BIT; 
 	while ( !(USB_INTR_PENDING & (1<<USB_INTR_PENDING_BIT)) ) // stop on USB activity
 	{
-		// Check for USB reset. Sets usb_was_reset if so.
+		// Check for USB reset
 		usbPoll();
+		if ( usb_was_reset )
+			break;
 		
 		// Check power key periodically
 		if ( TCNT1 >= inactive_timeout )
@@ -134,108 +134,6 @@ static void while_usb_inactive( void )
 	DEBUG( debug_log( 0x1b, 0, 0 ) );
 }
 
-static void usb_keyboard_send_if_changed( void )
-{
-	if ( usb_changed )
-	{
-		usb_changed = false;
-		usb_keyboard_send();
-	}
-}
-
-static void handle_adb( void )
-{
-	static byte adb_extra_ = 0xFF;
-	
-	cli();
-	uint16_t keys = adb_host_kbd_recv();
-	sei();
-	
-	release_caps();
-	
-	// The three potential events (0xFF=none), listed in order of occurrence
-	byte key2 = adb_extra_;  // possibly == 0xFF
-	byte key1 = keys >> 8;   // != 0xFF
-	byte key0 = keys & 0xFF; // possibly == 0xFF
-	
-	// Parse extra now
-	adb_extra_ = 0xFF;
-	if ( key2 != 0xFF )
-		parse_adb( key2 );
-	
-	// See if no new events
-	if ( keys == adb_host_nothing || keys == adb_host_error )
-		return;
-	
-	// For some keys (e.g. power) the same event is in both bytes
-	if ( key0 == key1 )
-		key0 = 0xFF;
-	
-	// We've got three events, some or all of which could be for the same key.
-	// In that case, we must send the updates over USB separately or lose a
-	// key press. There are an exasperating number of possible situations:
-	//
-	// Key 
-	// 210 Sends Extra
-	// ---------------
-	// -B-   B   -
-	// -BC   BC  -
-	// -Bb   B   b
-	// AB-   AB  -
-	// ABC   ABC -
-	// ABa   AB  a
-	// AaB   AB  a
-	// Aa-   A   a
-	// AaA A a   A
-	
-	// Cases are listed below where they are handled
-		
-	if ( key2 != 0xFF )
-	{
-		if ( ((key2 ^ key0) & 0x7F) == 0 )
-		{
-			// ABa   AB  a
-			// AaA A a   A
-			
-			// If both new events are same as extra key, we must send extra,
-			// first event, then save second event as new extra
-			if ( ((key2 ^ key1) & 0x7F) == 0 )
-				usb_keyboard_send_if_changed();
-			
-			// Second event matches extra, so save as new extra
-			adb_extra_ = key0;
-			parse_adb( key1 );
-			return;
-		}
-		
-		if ( ((key2 ^ key1) & 0x7F) == 0 )
-		{
-			// AaB   AB  a
-			// Aa-   A   a
-			
-			// First event matches extra, so save as new extra
-			adb_extra_ = key1;
-			if ( key0 != 0xFF )
-				parse_adb( key0 );
-			return;
-		}
-		
-		// No matches, so extra gets merged with new events
-		// AB-   AB  -
-		// ABC   ABC -
-	}
-	// -B-   B   -
-	// -BC   BC  -
-	// -Bb   B   b
-	
-	parse_adb( key1 );
-	
-	if ( ((key1 ^ key0) & 0x7F) == 0 )
-		adb_extra_ = key0;
-	else if ( key0 != 0xFF )
-		parse_adb( key0 );
-}
-
 static void init( void )
 {
 	#ifdef clock_prescale_set
@@ -251,22 +149,30 @@ static void init( void )
 	DDRD  = 0;
 	PORTD = 0xFF;
 	
+	#if ADB_TXD_PULLUP
+		PORTD |= 1<<1;
+		DDRD  |= 1<<1;
+	#endif
+	
 	adb_usb_init();
 	timer1_init();
 }
 
+static void split_adb( uint16_t keys );
+
 int main( void )
 {
 	init();
+	usb_was_reset = false; // already handled
 	
-	byte frame = 0;
+	uint8_t frame = 0;
 	for ( ;; )
 	{
 		handle_reset();
 		
 		// Update while USB is idle before next interrupt
 		if ( usb_keyboard_poll() )
-			usb_keyboard_send_if_changed();
+			usb_keyboard_update();
 		
 		if ( wait_usb() )
 		{
@@ -274,8 +180,8 @@ int main( void )
 			continue;
 		}
 		
-		byte synced_time = TCNT1L;
-		usb_keyboard_send_if_changed();
+		uint8_t synced_time = TCNT1L;
+		usb_keyboard_update();
 		
 		// Poll ADB every two out of three frames
 		if ( frame <= 1 )
@@ -283,21 +189,112 @@ int main( void )
 			// Delay second poll by half a frame
 			enum { half_interrupt = 3800L * tcnt1_hz / 1000000 };
 			if ( frame == 1 )
-				while ( (byte) (TCNT1L - synced_time) < half_interrupt )
+				while ( (uint8_t) (TCNT1L - synced_time) < half_interrupt )
 					{ }
 			
-			handle_adb();
-			keymap_idle();
-			update_idle(); // boot protocol timed update
+			split_adb( adb_usb_read() );
+			update_idle();
+			
 			frame++;
 		}
 		else
 		{
 			// Every third frame, update LEDs instead of polling ADB
 			// This also gives USB a chance to send LED updates
-			handle_leds();
+			adb_usb_update_leds();
 			
 			frame = 0;
 		}
 	}
+	
+	return 0;
+}
+
+// Splits pair of ADB key events into multiple USB reports if necessary
+static void split_adb( uint16_t keys )
+{
+	static uint8_t adb_extra_ = 0xFF;
+	
+	// The three potential events (0xFF=none), listed in order of occurrence
+	uint8_t key2 = adb_extra_;  // possibly == 0xFF
+	uint8_t key1 = keys >> 8;   // != 0xFF
+	uint8_t key0 = keys & 0xFF; // possibly == 0xFF
+	
+	// We've got three events, some or all of which could be for the same key.
+	// In that case, we must send the updates over USB separately or lose a
+	// key press. There are an exasperating number of possible situations
+	// (uppercase = pressed, lowercase = released):
+	//
+	// Key 
+	// 210 Sends Extra
+	// ---------------
+	// -B-   B   -
+	// -BC   BC  -
+	// -Bb   B   b
+	// AB-   AB  -
+	// ABC   ABC -
+	// ABa   AB  a
+	// AaB   AB  a
+	// Aa-   A   a
+	// AaA A a   A
+	
+	// Parse extra now
+	adb_extra_ = 0xFF;
+	if ( key2 != 0xFF )
+		adb_usb_handle( key2 );
+	
+	// See if no new events
+	if ( keys == adb_host_nothing || keys == adb_host_error )
+		return;
+	
+	// For some keys (e.g. power) the same event is in both bytes
+	if ( key0 == key1 )
+		key0 = 0xFF;
+	
+	// Cases are listed below where they are handled
+		
+	if ( key2 != 0xFF )
+	{
+		if ( ((key2 ^ key0) & 0x7F) == 0 )
+		{
+			// ABa   AB  a
+			// AaA A a   A
+			
+			// If both new events are same as extra key, we must send extra,
+			// first event, then save second event as new extra
+			if ( ((key2 ^ key1) & 0x7F) == 0 )
+				usb_keyboard_update();
+			
+			// Second event matches extra, so save as new extra
+			adb_extra_ = key0;
+			adb_usb_handle( key1 );
+			return;
+		}
+		
+		if ( ((key2 ^ key1) & 0x7F) == 0 )
+		{
+			// AaB   AB  a
+			// Aa-   A   a
+			
+			// First event matches extra, so save as new extra
+			adb_extra_ = key1;
+			if ( key0 != 0xFF )
+				adb_usb_handle( key0 );
+			return;
+		}
+		
+		// No matches, so extra gets merged with new events
+		// AB-   AB  -
+		// ABC   ABC -
+	}
+	// -B-   B   -
+	// -BC   BC  -
+	// -Bb   B   b
+	
+	adb_usb_handle( key1 );
+	
+	if ( ((key1 ^ key0) & 0x7F) == 0 )
+		adb_extra_ = key0;
+	else if ( key0 != 0xFF )
+		adb_usb_handle( key0 );
 }

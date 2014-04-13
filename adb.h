@@ -36,7 +36,6 @@ void adb_host_kbd_led( uint8_t led );
 bool adb_host_psw( void );
 
 
-// Legacy support
 #define ADB_POWER       0x7F
 #define ADB_CAPS        0x39
 

@@ -1,130 +1,55 @@
 // Conversion from ADB to USB, including locking caps to momentary caps USB uses
 
+#include <stdint.h>
+
 // Init ADB reading and initialize keyboard
-static void adb_usb_init( void );
+void adb_usb_init( void );
 
-// Parse an ADB key press/release byte and update keyboard_modifiers and keyboard_keys.
-static void parse_adb( unsigned char raw );
+// Handle an ADB key press/release byte and update keyboard_modifiers and keyboard_keys.
+void adb_usb_handle( uint8_t raw );
 
-// Call before each ADB transaction to process previous press of caps lock.
-static void release_caps( void );
+// Reads new ADB event pair from keyboard and releases caps if necessary
+uint16_t adb_usb_read( void );
 
-// Call periodically to update LED state
-static void handle_leds( void );
+// Call tens of times a second
+void adb_usb_update_leds( void );
+
+
+//// Source
 
 #include "keymap.h"
+#include "usb_keyboard_event.h"
 #include "adb.h"
 #include "usb_keyboard.h"
 
-enum { max_keys = 6 };
+static void adb_usb_handle_( uint8_t raw )
+{
+	usb_keyboard_event( keymap_to_usb( raw & 0x7f ), ~raw & 0x80 );
+}
+
+// Locking caps to USB momentary caps
+
 enum { released_mask = 0x80 };
+enum { caps_mask = 0x02 };
 enum { adb_caps = 0x39 };
 
-bool usb_changed;
+static uint8_t caps_pressed;
+static uint8_t caps_on;
 
-static void parse_adb_( byte raw )
-{
-	keymap_handle_event( raw );
-}
-
-// called by keymap_handle_event()
-void keymap_usb_hook( uint8_t code, uint8_t released )
-{
-	if ( !code )
-		return;
-	
-	usb_changed = true;
-	
-	if ( KC_LCTRL <= code && code <= KC_RGUI )
-	{
-		// Modifier; route to mask rather than keys list
-		byte mask = 1 << (code - KC_LCTRL);
-		keyboard_modifier_keys |= mask;
-		if ( released )
-			keyboard_modifier_keys ^= mask;
-	}
-	else
-	{
-		// Find key
-		byte* p = keyboard_keys + 6;
-		do
-		{
-			if ( *--p == code )
-				break;
-		}
-		while ( p != keyboard_keys );
-
-		if ( released )
-		{
-			// Remove key
-			if ( *p == code )
-			{
-				*p = 0;
-				return;
-			}
-			
-			DEBUG(debug_byte( code ));
-			DEBUG(debug_str( "released key not in list\n" ));
-		}
-		else
-		{
-			// Don't add if already there (sometimes keyboard gives multiple
-			// key down events when pressing lots of keys)
-			if ( *p == code )
-			{
-				DEBUG(debug_str( "pressed key already in list\n" ));
-				return;
-			}
-			
-			// Add to first empty entry
-			p = keyboard_keys + 6;
-			do
-			{
-				if ( *--p == 0 )
-				{
-					*p = code;
-					return;
-				}
-			}
-			while ( p != keyboard_keys );
-			
-			DEBUG(debug_str( "too many keys pressed\n" ));
-		}
-	}
-}
-
-#ifdef UNLOCKED_CAPS
-
-static void parse_adb( byte raw )
-{
-	parse_adb_( raw );
-}
-
-static void release_caps( void ) { }
-
-static void leds_changed( byte leds ) { (void) leds; }
-
-#else
-
-enum { caps_mask = 2 };
-
-static byte caps_pressed;
-static byte caps_on;
-
-static void release_caps( void )
+static void caps_release( void )
 {
 	if ( caps_pressed )
 	{
 		caps_pressed = false;
-		parse_adb_( adb_caps | released_mask );
+		adb_usb_handle_( adb_caps | released_mask );
 	}
 }
 
-static void leds_changed( byte leds )
+static void caps_set_leds( uint8_t leds )
 {
 	// only update our flag when USB host changes caps LED
-	static byte prev_caps_led;
-	byte caps_led = leds & caps_mask;
+	static uint8_t prev_caps_led;
+	uint8_t caps_led = leds & caps_mask;
 	if ( prev_caps_led != caps_led )
 	{
 		prev_caps_led = caps_led;
@@ -132,27 +57,20 @@ static void leds_changed( byte leds )
 	}
 }
 
-static void parse_adb( byte raw )
+static void caps_event( uint8_t raw )
 {
-	if ( (raw & 0x7F) != adb_caps )
-	{
-		parse_adb_( raw );
-		return;
-	}
-	
-	byte new_caps = (raw & released_mask) ? 0 : caps_mask;
+	uint8_t new_caps = (raw & released_mask) ? 0 : caps_mask;
 	if ( caps_on != new_caps )
 	{
 		// in case host doesn't handle LED, keep ours updated
 		caps_on = new_caps;
 		caps_pressed = 1;
-		parse_adb_( adb_caps );
+		adb_usb_handle_( adb_caps );
 	}
 }
 
-#endif
 
-static void adb_usb_init( void )
+void adb_usb_init( void )
 {
 	adb_host_init();
 	_delay_ms( 300 ); // keyboard needs at least 250ms or it'll ignore host_listen below
@@ -171,17 +89,41 @@ static void adb_usb_init( void )
 		{ }
 }
 
-static void handle_leds( void )
+uint16_t adb_usb_read( void )
 {
-	static byte leds = -1;
-	byte new_leds = keyboard_leds;
+	cli(); // don't let anything upset ADB timing
+	uint16_t keys = adb_host_kbd_recv();
+	sei();
+	
+	caps_release();
+	
+	return keys;
+}
+
+void adb_usb_update_leds( void )
+{
+	static uint8_t leds = -1;
+	uint8_t new_leds = keyboard_leds;
 	if ( leds != new_leds )
 	{
 		leds = new_leds;
-		leds_changed( new_leds );
+		caps_set_leds( new_leds );
 		
 		cli();
 		adb_host_kbd_led( ~new_leds & 0x07 );
 		sei();
 	}
+}
+
+void adb_usb_handle( uint8_t raw )
+{
+	#if !UNLOCKED_CAPS
+		if ( (raw & 0x7f) == adb_caps )
+		{
+			caps_event( raw );
+			return;
+		}
+	#endif
+	
+	adb_usb_handle_( raw );
 }
