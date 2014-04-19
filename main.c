@@ -82,8 +82,8 @@ static void handle_reset( void )
 
 enum { inactive_timeout = tcnt1_hz / 4 }; // no USB activity signals host asleep or resetting
 
-// Waits for USB activity. Returns true if timed out.
-static bool wait_usb( void )
+// Waits for USB activity and returns TCNT1L after first burst of USB activity
+static uint8_t wait_usb( void )
 {
 	// accumulate time since last change to TCNT1
 	idle_timer += TCNT1 - -inactive_timeout;
@@ -93,7 +93,10 @@ static bool wait_usb( void )
 	usb_inactive = false;
 	sleep_enable();
 	sleep_cpu();
-	return usb_inactive;
+	
+	uint8_t time = TCNT1L;
+	_delay_us( 150 ); // sometimes there's more activity a little after first burst
+	return time;
 }
 
 // Waits until USB becomes active, host issues USB reset, or keyboard power key is pressed
@@ -174,20 +177,20 @@ int main( void )
 		if ( usb_keyboard_poll() )
 			usb_keyboard_update();
 		
-		if ( wait_usb() )
+		uint8_t synced_time = wait_usb();
+		if ( usb_inactive )
 		{
 			while_usb_inactive();
 			continue;
 		}
 		
-		uint8_t synced_time = TCNT1L;
 		usb_keyboard_update();
 		
 		// Poll ADB every two out of three frames
 		if ( frame <= 1 )
 		{
 			// Delay second poll by half a frame
-			enum { half_interrupt = 3800L * tcnt1_hz / 1000000 };
+			enum { half_interrupt = 3300L * tcnt1_hz / 1000000 };
 			if ( frame == 1 )
 				while ( (uint8_t) (TCNT1L - synced_time) < half_interrupt )
 					{ }
@@ -202,6 +205,11 @@ int main( void )
 			// Every third frame, update LEDs instead of polling ADB
 			// This also gives USB a chance to send LED updates
 			adb_usb_update_leds();
+			
+			// Take at least until near the next 8ms USB slot
+			enum { min_time = 4000L * tcnt1_hz / 1000000 };
+			while ( (uint8_t) (TCNT1L - synced_time) < min_time )
+				{ }
 			
 			frame = 0;
 		}

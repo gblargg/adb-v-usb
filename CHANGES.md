@@ -1,3 +1,4 @@
+* Fixed USB synchronization issue where it could do ADB polling more often than every 12ms.
 * Added ADB_TXD_PULLUP to drive TXD high, allowing use of 1K series resistor as ADB data pull-up
 * Improved keymap interface to allow custom handling of all keys, allowing potential layers, generation of multi-key macros
 * Added ADB_SWAP_CMD_OPTION to act like Apple ADB keyboard
