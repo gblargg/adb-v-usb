@@ -71,12 +71,16 @@ static void handle_reset( void )
 	// USB command every 8ms
 	if ( usb_was_reset )
 	{
-		usb_was_reset = false;
 		
 		DEBUG( debug_log( 0x1c, 0, 0 ) );
 		usb_keyboard_reset();
-		while ( TCNT1 < tcnt1_hz / 2 )
+		while ( TCNT1 < tcnt1_hz )
+		{
+			usb_was_reset = false;
 			usbPoll();
+			if ( usb_was_reset )
+				TCNT1 = 0;
+		}
 	}
 }
 

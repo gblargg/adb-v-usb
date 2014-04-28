@@ -1,6 +1,7 @@
 #include "usb_keyboard.h"
 
 #include <stdbool.h>
+#include <string.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
 
@@ -131,13 +132,16 @@ uint8_t usb_configured( void )
 
 void usb_keyboard_reset( void )
 {
-	protocol = 1;
+	protocol             = 1;
 	keyboard_idle_period = 0;
+	keyboard_leds        = 0;
+	memset( keyboard_report_, 0, sizeof keyboard_report_ );
 }
 
 uint8_t usb_keyboard_poll( void )
 {
 	sei(); // so caller doesn't ever even have to enable interrupts
+	usbPoll();
 	usbPoll();
 	return usbInterruptIsReady();
 }
